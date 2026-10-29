@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · Orchestrator ACME Cert Manager{% endblock %}
+{% block content %}
+  <div class="auth-wrap">
+    <div class="panel auth-card">
+      <h1>{{ title }}</h1>
+      <p class="small" style="margin:8px 0 0">{{ message }}</p>
+      <p class="small muted" style="margin:12px 0 0">HTTP {{ status }}</p>
+      <div class="form-actions"><a class="btn secondary" href="{{ url_for('index') }}">Back to the fleet</a></div>
+    </div>
+  </div>
+{% endblock %}

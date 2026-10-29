@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+{% set nav = 'system' %}
+{% block title %}System · Orchestrator ACME Cert Manager{% endblock %}
+{% block content %}
+  {% import "_macros.html" as m with context %}
+  {% set fatal = sys.findings|selectattr('level','equalto','fatal')|list %}
+  {% set warns = sys.findings|selectattr('level','equalto','warn')|list %}
+
+  <div class="detail-head">
+    <div>
+      <h1>System</h1>
+      <div class="sub">version <span class="mono">{{ sys.version }}</span> ·
+        {% if sys.in_container %}running in a container{% else %}running outside a container{% endif %} ·
+        {% if fatal %}{{ m.status('critical', fatal|length ~ ' blocking') }}
+        {% elif warns %}{{ m.status('warning', warns|length ~ ' warning' ~ ('s' if warns|length != 1 else '')) }}
+        {% else %}{{ m.status('ok', 'checks pass') }}{% endif %}</div>
+    </div>
+    <div class="actions">
+      <a class="btn secondary" href="{{ url_for('system_page') }}" title="Re-run every check (read-only)">Re-run checks</a>
+      <a class="btn secondary" href="{{ url_for('api_status') }}?probe=1" title="The same data as JSON">JSON</a>
+    </div>
+  </div>
+
+  <div class="alert a-info">
+    <strong>What this page can and cannot change</strong>
+    Everything here is read-only. Items marked <span class="host-tag">host</span> or carrying the <span class="info" tabindex="0" aria-label="example indicator"><span class="info-g" aria-hidden="true">i</span></span>
+    indicator are configured on the Docker host (setup.sh, .env, docker compose) and show the command that changes them.
+    Host-level readiness (Docker, Compose plugin, .env drift, file ownership) is checked by
+    <code>./upgrade-check.sh</code> on the host, because the container cannot see the host.
+  </div>
+
+  {# ------------------------------------------------------------------ checks #}
+  <div class="section">
+    <div class="section-head"><h2>Checks (preflight)</h2>
+      <span class="small muted">the same report as <code>python -m app.cli check</code>, run just now</span></div>
+    <div class="panel table-wrap">
+      <table class="grid">
+        <thead><tr><th>Level</th><th>Code</th><th>Finding</th></tr></thead>
+        <tbody>
+        {% for f in sys.findings %}
+          <tr>
+            <td class="nowrap">{% if f.level == 'fatal' %}{{ m.status('critical', 'blocking') }}{% elif f.level == 'warn' %}{{ m.status('warning', 'warning') }}{% else %}{{ m.status('ok', 'info') }}{% endif %}</td>
+            <td class="mono small">{{ f.code }}</td>
+            <td class="msg small">{{ f.message }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="3" class="empty">No findings.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  {# ------------------------------------------------------------ config + scheduler #}
+  <div class="section cols-2">
+    <div class="panel panel-body">
+      <h2>Configuration &amp; persistence</h2>
+      <dl class="kv">
+        <dt>Server list</dt><dd class="mono">{{ sys.servers_file }}</dd>
+        <dt>History</dt><dd class="mono">{{ sys.history_file }}</dd>
+        <dt>Persistence</dt><dd>
+          {% if sys.config_mounted %}<span class="check good"><span class="g">●</span>bind-mounted</span>
+          {% elif sys.config_mounted is sameas false %}<span class="check bad"><span class="g">✕</span>not mounted</span>
+          {% else %}<span class="muted">n/a outside a container</span>{% endif %}
+          {{ m.info('The /config mount is defined in docker-compose.yml on the host. Without it every UI change is lost on recreate.', './config:/config in docker-compose.yml') }}</dd>
+        <dt>Config shape</dt><dd>{% if sys.config_version == 2 %}<span class="check good"><span class="g">●</span>certificates + targets (v2)</span>{% elif sys.config_version == 1 %}<span class="check warn"><span class="g">▲</span>pre-1.3 servers list (v1)</span> <span class="muted small">migrated in memory; rewritten on the next save</span>{% else %}<span class="muted">no file yet</span>{% endif %}</dd>
+        <dt>Service user</dt><dd class="mono">uid {{ sys.uid }} · gid {{ sys.gid }} {{ m.info('The container runs unprivileged; config/ and data/ on the host must be owned by this uid. setup.sh writes OACM_UID/OACM_GID to .env.', 'OACM_UID=<uid> OACM_GID=<gid> in .env') }}</dd>
+        <dt>Drivers</dt><dd>{% for d in sys.drivers %}<span class="pill driver">{{ d.label }}</span> {% endfor %}</dd>
+        <dt>Admin account</dt><dd>{% if sys.paths.admin_present %}<span class="check good"><span class="g">●</span>present</span>{% else %}<span class="check warn"><span class="g">▲</span>not created</span>{% endif %}
+          {{ m.info('Reset from the host by deleting the credential file; the next visit shows the Setup page.', 'rm config/admin.json') }}</dd>
+        <dt>Certificates</dt><dd class="mono">{{ sys.paths.certs_dir }}</dd>
+        <dt>API trust bundles</dt><dd class="mono">{{ sys.paths.trust_dir }} {{ m.info('Immutable, digest-named bundles built from system roots plus the lab root (and retired roots) for verified Orchestrator API calls. Rebuilt automatically; safe to delete.') }}</dd>
+      </dl>
+    </div>
+    <div class="panel panel-body">
+      <h2>Scheduler</h2>
+      {% set sc = sys.scheduler %}
+      <dl class="kv">
+        <dt>Next run</dt><dd>{% if sc.next_run %}<span class="mono">{{ sc.next_run|replace('T',' ') }}</span>{% else %}<span class="muted">unknown</span>{% endif %} <span class="muted small">({{ sc.tz }})</span></dd>
+        <dt>Schedule</dt><dd>{% for e in sc.entries %}<span class="mono">{{ e.expr }}</span>{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">crontab not readable ({{ sc.crontab }})</span>{% endfor %}
+          {{ m.info('The schedule is baked into the image from config/crontab; change it there and rebuild.', 'edit config/crontab; docker compose up -d --build') }}</dd>
+        <dt>Renewal window</dt><dd>{{ sc.window_days }}{% if sc.window_days|string|int(-1) >= 0 %} days before expiry{% else %} remaining{% endif %} {{ m.info('Unset: renew once a third of the certificate lifetime remains. RENEW_WINDOW_DAYS in .env on the host overrides with an absolute window; restart to apply.', 'RENEW_WINDOW_DAYS=30') }}</dd>
+        <dt>Last scheduled run</dt><dd>{% if sc.last_scheduled %}<span class="dot {{ sc.last_scheduled.outcome }}"></span>{{ sc.last_scheduled.outcome }} · {{ sc.last_scheduled.server_id }} · {{ relative_time(sc.last_scheduled.timestamp) }}{% else %}<span class="muted">none recorded yet</span>{% endif %}</dd>
+        <dt>Scheduler health</dt><dd>{% if sc.stale %}<span class="check bad"><span class="g">✕</span>stale — no scheduled run finished within {{ (2 * sc.interval_hours)|round|int }} h; /healthz reports 503</span>{% elif sc.state and sc.state.finished %}<span class="check good"><span class="g">●</span>last pass finished {{ relative_time(sc.state.finished) }}{% if sc.state.failed %} · failed: {{ sc.state.failed|join(', ') }}{% endif %}</span>{% elif sc.state and sc.state.started %}<span class="check warn"><span class="g">▲</span>a pass started {{ relative_time(sc.state.started) }} and has not finished</span>{% else %}<span class="muted">no scheduled pass yet since the container started</span>{% endif %}
+          {{ m.info('renew-all --source cron writes scheduler.json next to the server list; the container health check turns unhealthy after two missed intervals.', 'docker compose ps; docker compose logs --tail 50') }}</dd>
+        {% if sys.locks %}<dt>Runs in progress</dt><dd>{% for cid, h in sys.locks.items() %}<span class="mono">{{ cid }}</span> ({{ h.kind }} · {{ h.actor or h.source or '?' }} · pid {{ h.pid }} · {{ relative_time(h.started) }}){% if not loop.last %}<br>{% endif %}{% endfor %}</dd>{% endif %}
+      </dl>
+      <p class="help">Force renew and Force deploy on the Fleet page run the same pipeline on demand. Scheduled runs only renew certificates inside the window.</p>
+    </div>
+  </div>
+
+  {# ------------------------------------------------------------ environment + ssh #}
+  <div class="section">
+    <div class="panel table-wrap">
+      <div class="panel-body" style="padding-bottom:6px"><h2 style="margin:0">Environment <span class="host-tag">host</span></h2>
+        <p class="small muted" style="margin:6px 0 0">Values come from <code>.env</code> on the host. Secrets are shown as set or unset, never their value. Changes need <code>docker compose down &amp;&amp; docker compose up -d</code>.</p></div>
+      <table class="grid">
+        <thead><tr><th>Variable</th><th>State</th><th>Value</th><th>Purpose</th></tr></thead>
+        <tbody>
+        {% for e in sys.environment %}
+          <tr>
+            <td class="mono small nowrap">{{ e.name }}</td>
+            <td class="nowrap">{% if e.state == 'set' %}<span class="check good"><span class="g">●</span>set</span>
+                {% elif e.state == 'default' %}<span class="muted">default</span>
+                {% else %}<span class="check warn"><span class="g">▲</span>unset</span>{% endif %}</td>
+            <td class="mono small">{% if e.kind == 'secret' %}{% if e.state == 'set' %}••••••{% else %}—{% endif %}{% else %}{{ e.value or '—' }}{% endif %}</td>
+            <td class="small msg">{{ e.description }} {{ m.info(e.description, e.via) }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+  </div>
+
+  <div class="section">
+    <div class="panel panel-body">
+      {% set ssh = sys.ssh %}
+      <h2>SSH material <span class="host-tag">host</span></h2>
+      <p class="small muted" style="margin:0 0 8px">Mounted read-only from <span class="mono">{{ ssh.mount }}</span>. Generated and pinned by <code>./setup.sh</code>.</p>
+      {% for k in ssh.key_files %}
+        <dl class="kv">
+          <dt>Key</dt><dd class="mono">{{ k.path }} {{ m.info(ssh.via_key, './setup.sh') }}</dd>
+          <dt>State</dt><dd>{% if not k.exists %}<span class="check bad"><span class="g">✕</span>missing</span>
+            {% elif k.problem %}<span class="check bad"><span class="g">✕</span>{{ k.problem }}</span>
+            {% else %}<span class="check good"><span class="g">●</span>{{ k.type }} {{ k.bits }} bit, no passphrase</span>{% endif %}</dd>
+          {% if k.fingerprint %}<dt>Fingerprint</dt><dd class="mono small">{{ k.fingerprint }}</dd>{% endif %}
+        </dl>
+      {% endfor %}
+      {% for kh in ssh.known_hosts_files %}
+        <dl class="kv">
+          <dt>Known hosts</dt><dd class="mono">{{ kh.path }} {{ m.info(ssh.via_known_hosts, './setup.sh --host <orchestrator>') }}</dd>
+          <dt>Pinned</dt><dd>{% if not kh.exists %}<span class="check bad"><span class="g">✕</span>file missing</span>{% elif kh.problem %}<span class="check bad"><span class="g">✕</span>{{ kh.problem }}</span>{% elif kh.hosts %}<span class="mono small">{{ kh.hosts|join(', ') }}</span>{% else %}<span class="check warn"><span class="g">▲</span>no entries</span>{% endif %}</dd>
+        </dl>
+      {% endfor %}
+      {% if ssh.servers %}
+      <table class="grid" style="margin-top:8px">
+        <thead><tr><th>Server</th><th>Target</th><th>Host key</th><th>Settings</th></tr></thead>
+        <tbody>
+        {% for s in ssh.servers %}
+          <tr>
+            <td><a href="{{ url_for('server_detail', server_id=s.id) }}">{{ s.id }}</a></td>
+            <td class="mono small">{{ s.user or '?' }}@{{ s.host }}:{{ s.port }}</td>
+            <td>{% if s.pinned %}<span class="check good"><span class="g">●</span>pinned</span>{% else %}<span class="check bad"><span class="g">✕</span>not pinned</span> {{ m.info('Pin it on the host after confirming the fingerprint.', './setup.sh --host ' ~ s.host ~ ' --ssh-port ' ~ s.port) }}{% endif %}</td>
+            <td>{% if s.problems %}<span class="check bad"><span class="g">✕</span>{{ s.problems|length }} problem{{ 's' if s.problems|length != 1 }}</span>{% else %}<span class="check good"><span class="g">●</span>valid</span>{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+      <p class="help">The sudoers rule on the appliance is not visible from here: press <strong>Test SSH</strong> on a server to probe it {{ m.info(ssh.via_sudoers, './setup.sh --host <orchestrator> --install-sudoers') }}</p>
+    </div>
+  </div>
+
+  {# ------------------------------------------------------------ lab CA #}
+  <div class="section">
+    {% set ca = sys.lab_ca %}
+    <div class="section-head"><h2>Bundled lab CA <span class="host-tag">host</span></h2>
+      {% if ca.configured %}<span class="small muted">the same data as <code>python -m app.cli ca-info</code></span>{% endif %}</div>
+    {% if not ca.configured %}
+      <div class="panel panel-body">
+        <p style="margin:0 0 6px">{{ m.status('none', 'not configured') }}</p>
+        <p class="small" style="margin:0">Initialise it on the Docker host; the identity (host, domain, port) is pinned at init and written to <code>.env</code>.
+          {{ m.info(ca.via, './setup.sh --with-ca --lab-domain <zone>') }}</p>
+        <pre class="cmd-block">./setup.sh --with-ca --lab-domain &lt;zone&gt;
+docker compose up -d</pre>
+        <p class="help">Prerequisites: a DNS-only record for the CA host pointing at the Docker host's private address, the Cloudflare token (the lab CA validates DNS-01 too), and a free port (9000 by default). <code>./upgrade-check.sh --with-ca --lab-domain &lt;zone&gt;</code> verifies all three before you start.</p>
+      </div>
+    {% else %}
+      <div class="cols-2">
+        <div class="panel panel-body">
+          <dl class="kv">
+            <dt>Identity</dt><dd class="mono">{{ ca.host }}:{{ ca.port }}{% if ca.domain %} · issues under .{{ ca.domain }}{% endif %} {{ m.info('Pinned at init in data/pki/config/lab-ca.meta; setup.sh refuses to change it in place.', ca.via) }}</dd>
+            <dt>State</dt><dd>
+              {% if not ca.root_present %}<span class="check bad"><span class="g">✕</span>root certificate missing at <span class="mono">{{ ca.root_file }}</span></span> {{ m.info('Mount ./data/pki/certs (compose does) and re-run the init on the host.', './setup.sh --with-ca') }}
+              {% elif ca.health and ca.health.ok %}<span class="check good"><span class="g">●</span>healthy — answered /health with the lab root as trust</span>
+              {% elif ca.health %}<span class="check bad"><span class="g">✕</span>not reachable: <span class="mono">{{ ca.health.error }}</span></span> {{ m.info('Is the lab-ca service up? COMPOSE_PROFILES=lab-ca must be in .env.', 'docker compose up -d lab-ca && docker compose logs lab-ca') }}
+              {% else %}<span class="muted">not probed</span>{% endif %}</dd>
+            <dt>ACME directory</dt><dd class="mono small">{{ ca.acme_url }}</dd>
+            <dt>CRL</dt><dd class="mono small">{{ ca.crl_url }}</dd>
+            <dt>Root (public)</dt><dd class="mono small">{{ ca.roots_url }}</dd>
+            <dt>Root SHA-256</dt><dd class="mono small" style="word-break:break-all">{{ ca.fingerprint or '—' }}</dd>
+            <dt>Root key</dt><dd>{% if ca.root_key_offline %}<span class="check good"><span class="g">●</span>offline (marker present)</span>{% else %}<span class="check warn"><span class="g">▲</span>unknown — marker missing</span>{% endif %}
+              {{ m.info('The root key lives in data/pki-root on the host and must be moved off the host before any client trusts the root.', 'mv data/pki-root <offline storage>') }}</dd>
+            {% if ca.retired_roots %}<dt>Rollover</dt><dd><span class="check warn"><span class="g">▲</span>{{ ca.retired_roots|length }} retired root(s) still trusted</span> {{ m.info('Force renew every lab-CA server, then delete the retired roots on the host.', 'rm data/pki/certs/retired/*') }}</dd>{% endif %}
+            <dt>Issuers</dt><dd class="mono small">{{ ca.issuers|join('; ') if ca.issuers else '—' }}</dd>
+          </dl>
+          <div class="actions" style="justify-content:flex-start;margin-top:10px">
+            {% if ca.root_present %}<a class="btn secondary sm" href="{{ url_for('ca_root_pem') }}">Download root</a>{% endif %}
+            {% if ca.intermediate_present %}<a class="btn secondary sm" href="{{ url_for('ca_intermediate_pem') }}">Download intermediate</a>{% endif %}
+          </div>
+          <p class="help">Confirm the fingerprint out of band before installing the root anywhere. Per-client steps are in the README under “Distribute the root”.</p>
+        </div>
+        <div class="panel panel-body">
+          <h3 class="small-head">Operations that run on the host <span class="host-tag">host</span></h3>
+          <p class="small muted" style="margin:0 0 8px">These change the PKI and are deliberately not exposed as buttons.</p>
+          <dl class="kv">
+            {% for op in ca.ops %}
+              <dt>{{ op.name }}</dt><dd><code class="mono small" style="word-break:break-all">{{ op.cmd }}</code><div class="small muted">{{ op.note }}</div></dd>
+            {% endfor %}
+          </dl>
+        </div>
+      </div>
+    {% endif %}
+  </div>
+
+  {# ------------------------------------------------------------ host-only operations #}
+  <div class="section">
+    <div class="section-head"><h2>Configured on the Docker host</h2><span class="small muted">run from the repository checkout</span></div>
+    <div class="panel table-wrap">
+      <table class="grid">
+        <thead><tr><th>What</th><th>Command</th><th>Notes</th></tr></thead>
+        <tbody>
+        {% for op in sys.host_operations %}
+          <tr><td class="nowrap">{{ op.name }}</td><td><code class="mono small">{{ op.cmd }}</code></td><td class="small msg">{{ op.note }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}

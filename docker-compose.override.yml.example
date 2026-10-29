@@ -5,7 +5,19 @@ services:
       # Force issuance/deploy on next start regardless of expiry (testing only).
       FORCE_RENEW: "false"
       LOG_LEVEL: "INFO"
+      # Downgrade fatal preflight findings (unmounted config, legacy-only
+      # config) to warnings. Only for one-off recovery work.
+      # STRICT_STARTUP: "false"
+      # Validation retries for transient Orchestrator 502/503/504 answers.
+      # DEPLOY_VALIDATION_ATTEMPTS: "3"
+      # DEPLOY_RETRY_BACKOFF: "5"
     # If the Orchestrator is only reachable by a private IP that DNS doesn't
     # resolve, map the FQDN here (parallels the ClearPass extra_hosts fix):
     # extra_hosts:
     #   - "orchestrator.example.com:x.x.x.x"
+    # ClearPass targets: ClearPass fetches the PKCS#12 from this container, so
+    # publish the callback port (the target's callback_port) on an interface the
+    # cluster nodes can reach, and limit it to them in the host firewall:
+    # ports:
+    #   - "127.0.0.1:8090:8080"
+    #   - "8765:8765"

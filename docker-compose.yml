@@ -1,14 +1,83 @@
 services:
   orchestrator-acme-cert-manager:
+    # Released images are published by .github/workflows/release.yml on each v* tag
+    # (linux/amd64 + linux/arm64, never :latest). `docker compose up -d` pulls this
+    # tag and falls back to building from this checkout only when the tag is not
+    # published; `docker compose up -d --build` always builds from the checkout.
+    image: ghcr.io/robertsonc/orchestrator-acme-cert-manager:1.3.0
     build: .
-    image: orchestrator-acme-cert-manager:latest
     container_name: orchestrator-acme-cert-manager
     restart: unless-stopped
     env_file: .env
+    # Runs unprivileged. setup.sh writes your own uid/gid into .env so the bind
+    # mounts below stay writable without a chown; the image default (10001)
+    # applies when they are absent and preflight then names the exact fix.
+    user: "${OACM_UID:-10001}:${OACM_GID:-10001}"
+    # A renewal can run for minutes (DNS propagation wait, activation polling); let a
+    # `docker compose down` finish the job in flight instead of killing it after 10 s.
+    stop_grace_period: 10m
+    environment:
+      # The server list, admin credential, session secret and renewal history
+      # all live in /config, which is bind-mounted below so UI changes survive
+      # `docker compose down` / image rebuilds. Preflight refuses to start if
+      # this path is not on a mount (STRICT_STARTUP=false downgrades to a warning).
+      CONFIG_DIR: /config
+      SERVERS_FILE: /config/servers.json
+      DATA_DIR: /data
     ports:
       - "127.0.0.1:8090:8080"   # bind to localhost only; reach via SSH tunnel
     volumes:
-      - ./config:/config
+      - ./config:/config              # writable directory mount (never a single file, never :ro)
       - ./data/certs:/data/certs
       - ./data/logs:/data/logs
-      - ./data/ssh:/data/ssh:ro
+      - ./data/ssh:/data/ssh:ro       # private key + pinned known_hosts, read-only in the container
+      - ./data/pki/certs:/data/pki/certs:ro   # lab CA root/intermediate (empty unless setup.sh --with-ca)
+    healthcheck:
+      # /healthz is 200 only while the web UI answers AND a scheduled run has
+      # happened within twice the cron interval (the entrypoint also exits when
+      # either process dies, so restart: unless-stopped recovers it).
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5).status == 200 else 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Optional bundled lab CA (step-ca). Enabled by COMPOSE_PROFILES=lab-ca in .env,
+  # initialised once by `./setup.sh --with-ca --lab-domain <zone>`.
+  # ACME (DNS-01 only) for this tool and anything ACME-capable; CRL; root at
+  # /roots.pem. The issuing CA is name-constrained to LAB_CA_DOMAIN.
+  # Port 9000 is published on the LAN because ACME/EST clients and trust-store
+  # downloads must reach it; the alias lets this container reach it by its
+  # certificate name without leaving the compose network.
+  # ---------------------------------------------------------------------------
+  lab-ca:
+    image: smallstep/step-ca:0.30.2
+    container_name: lab-ca
+    profiles: ["lab-ca"]
+    restart: unless-stopped
+    user: "${LAB_CA_UID:-1000}:${LAB_CA_GID:-1000}"
+    environment:
+      STEPPATH: /home/step
+      HOME: /home/step
+      LAB_CA_HOST: "${LAB_CA_HOST:-ca.lab.invalid}"
+      LAB_CA_PORT: "${LAB_CA_PORT:-9000}"
+    volumes:
+      - ./data/pki:/home/step           # ONLINE state only: intermediate key, config, db. The root
+                                        # key lives in ./data/pki-root, which is never mounted here.
+    ports:
+      - "${LAB_CA_PORT:-9000}:${LAB_CA_PORT:-9000}"   # step-ca listens on the same port inside and out
+    networks:
+      default:
+        aliases:
+          - "${LAB_CA_HOST:-ca.lab.invalid}"
+    extra_hosts:
+      # The CA's certificate is valid only for LAB_CA_HOST (name-constrained), so the
+      # health check and in-container tooling must address it by that name.
+      - "${LAB_CA_HOST:-ca.lab.invalid}:127.0.0.1"
+    healthcheck:
+      test: ["CMD-SHELL", "step ca health --ca-url https://$${LAB_CA_HOST}:$${LAB_CA_PORT} --root /home/step/certs/root_ca.crt"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

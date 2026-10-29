@@ -1,0 +1,82 @@
+{% macro csrf() -%}<input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token() }}">{%- endmacro %}
+
+{% macro status(state, label) -%}
+  {%- set glyph = {'ok': '●', 'warning': '▲', 'critical': '✕', 'unknown': '?', 'none': '○', 'working': ''}[state] -%}
+  <span class="status {{ state }}"><span class="g" aria-hidden="true">{{ glyph }}</span>{{ label }}</span>
+{%- endmacro %}
+
+{% macro env_pill(env) -%}
+  {%- if env == 'staging' %}<span class="pill staging">staging</span>
+  {%- elif env == 'production' %}<span class="pill prod">production</span>
+  {%- elif env == 'lab' %}<span class="pill lab" title="Issued by the bundled lab CA">lab</span>
+  {%- else %}<span class="pill quiet">—</span>{% endif -%}
+{%- endmacro %}
+
+{% macro driver_pill(name, label) -%}
+  <span class="pill driver" title="deploy target driver: {{ name }}">{{ label or name }}</span>
+{%- endmacro %}
+
+{% macro serial(s) -%}
+  {%- if s %}<span class="mono" title="{{ s }}">{{ s[:6] }}…{{ s[-6:] }}</span>{% else %}<span class="muted">—</span>{% endif -%}
+{%- endmacro %}
+
+{% macro outcome(h) -%}
+  {%- if h.rolled_back %}<span class="pill bad">rolled back</span>
+  {%- else %}<span class="dot {{ h.outcome }}"></span>{{ h.outcome }}{% endif -%}
+{%- endmacro %}
+
+{# who started a run: "scheduler · cron", "alice · web", "root · cli" #}
+{% macro who(h) -%}
+  {%- if h.actor or h.source %}<span class="muted small" title="started by {{ h.actor or '?' }} via {{ h.source or '?' }}">{{ h.actor or '?' }}{% if h.source %} · {{ h.source }}{% endif %}</span>{% else %}<span class="muted small">—</span>{% endif -%}
+{%- endmacro %}
+
+{% macro diag(d, key) -%}
+<details class="diag" data-key="{{ key }}">
+  <summary>Diagnostics</summary>
+  <dl class="diag-kv">
+    {% if d.phase %}<dt>Phase</dt><dd>{{ d.phase }}{% if d.kind %} · {{ d.kind }}{% endif %}</dd>{% endif %}
+    {% if d.endpoint %}<dt>Endpoint</dt><dd class="mono">{{ d.endpoint }}</dd>{% endif %}
+    {% if d.status is defined and d.status is not none %}<dt>HTTP</dt><dd>{{ d.status }}</dd>{% endif %}
+    {% if d.attempts %}<dt>Attempt</dt><dd>{{ d.attempt }} of {{ d.attempts }}</dd>{% endif %}
+    {% if d.elapsed_ms is defined %}<dt>Elapsed</dt><dd>{{ d.elapsed_ms }} ms</dd>{% endif %}
+    {% if d.request_id %}<dt>Request ID</dt><dd class="mono">{{ d.request_id }}</dd>{% endif %}
+    {% if d.command %}<dt>Command</dt><dd class="mono">{{ d.command }}</dd>{% endif %}
+    {% if d.exit is defined and d.exit is not none %}<dt>Exit</dt><dd>{{ d.exit }}</dd>{% endif %}
+    {% if d.response_excerpt %}<dt>Response</dt><dd class="mono">{{ d.response_excerpt }}</dd>{% endif %}
+    {% if d.stderr %}<dt>stderr</dt><dd class="mono">{{ d.stderr }}</dd>{% endif %}
+    {% if d.problems %}<dt>Problems</dt><dd>{% for p in d.problems %}{{ p }}<br>{% endfor %}</dd>{% endif %}
+    {% if d.restored_serial %}<dt>Restored</dt><dd class="mono">{{ d.restored_serial }}{% if d.cross_environment %} <span class="pill bad">cross-environment</span>{% endif %}</dd>{% endif %}
+    {% if d.snapshot_environment and d.reason %}<dt>Snapshot</dt><dd>{{ d.snapshot_environment }} certificate{% if d.snapshot_serial %} · <span class="mono">{{ d.snapshot_serial }}</span>{% endif %} — {{ d.reason }}</dd>{% endif %}
+    {% if d.next_action %}<dt>Next</dt><dd>{{ d.next_action }}</dd>{% endif %}
+  </dl>
+</details>
+{%- endmacro %}
+
+{# Info indicator for anything that depends on configuration done outside the UI.
+   `text` says what and where; `cmd` is the exact host command / .env key. Hover or
+   focus shows the tip; the aria-label carries the same text for screen readers. #}
+{% macro info(text, cmd='') -%}
+<span class="info" tabindex="0" aria-label="{{ text }}{% if cmd %} Command: {{ cmd }}{% endif %}"><span class="info-g" aria-hidden="true">i</span><span class="tip" role="tooltip"><span class="tip-text">{{ text }}</span>{% if cmd %}<code class="tip-cmd">{{ cmd }}</code>{% endif %}</span></span>
+{%- endmacro %}
+
+{# A visible "configured on the host" tag with the same tooltip, for list rows. #}
+{% macro host_tag(cmd, text='Configured on the Docker host, not from this UI.') -%}
+<span class="host-tag">host{{ info(text, cmd) }}</span>
+{%- endmacro %}
+
+{% macro action_buttons(r, origin, size='') -%}
+  <form method="post" action="{{ url_for('renew', server_id=r.id) }}"
+        data-confirm="Force renew contacts the ACME CA and issues a new certificate for {{ r.domain }}{% if r.siblings %}, then deploys it to every target that shares it ({{ (r.siblings + [r.id])|join(', ') }}){% endif %}. This counts against Let's Encrypt rate limits. Continue?">
+    {{ csrf() }}
+    <input type="hidden" name="return" value="{{ origin }}">
+    <button type="submit" class="btn {{ size }}" {% if r.renewing %}disabled{% endif %}
+            title="Issue from the ACME CA, then deploy and activate{% if r.siblings %} on every target of this certificate{% endif %}.">Force renew</button>
+  </form>
+  <form method="post" action="{{ url_for('force_deploy', server_id=r.id) }}"
+        data-confirm="Force deploy re-pushes the certificate on disk to {{ r.host }} and activates it{% if r.driver == 'orchestrator' %} (restarts the Orchestrator web service via SSH){% elif r.driver == 'clearpass' %} (ClearPass restarts the affected service on each node){% endif %}. No CA contact. Continue?">
+    {{ csrf() }}
+    <input type="hidden" name="return" value="{{ origin }}">
+    <button type="submit" class="btn secondary {{ size }}" {% if r.renewing or not r.cert.present %}disabled{% endif %}
+            title="Re-push the certificate already on disk to this target and activate. No CA contact.">Force deploy</button>
+  </form>
+{%- endmacro %}

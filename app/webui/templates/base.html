@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Orchestrator ACME Cert Manager{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script>
+    // Apply the saved theme before first paint. Dark is the default; the OS
+    // preference is only consulted when the viewer has never chosen.
+    (function () {
+      try {
+        var t = localStorage.getItem('oacm-theme');
+        if (!t && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) t = 'light';
+        document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body class="{% block bodyclass %}{% endblock %}">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="{{ url_for('index') }}">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">Orchestrator <strong>ACME</strong></span>
+      </a>
+      {% if current_user %}
+      <nav class="nav" aria-label="Primary">
+        <a href="{{ url_for('index') }}" class="{{ 'active' if nav == 'fleet' else '' }}">Fleet</a>
+        <a href="{{ url_for('settings') }}" class="{{ 'active' if nav == 'settings' else '' }}">Settings</a>
+        <a href="{{ url_for('system_page') }}" class="{{ 'active' if nav == 'system' else '' }}">System</a>
+      </nav>
+      {% endif %}
+      <div class="topbar-right">
+        {% block topbar_status %}{% endblock %}
+        <button type="button" class="icon-btn" id="theme-toggle" title="Toggle light / dark" aria-label="Toggle theme">
+          <span class="theme-glyph" aria-hidden="true"></span>
+        </button>
+        {% if current_user %}
+        <span class="user">{{ current_user }}</span>
+        <form method="post" action="{{ url_for('logout') }}" class="inline-form"><input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token() }}"><button type="submit" class="ghost-link as-link">Log out</button></form>
+        {% endif %}
+      </div>
+    </div>
+  </header>
+
+  <main class="page {% block pageclass %}{% endblock %}">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="foot">
+    <span>orchestrator-acme-cert-manager</span>
+    <span class="muted">{{ now }}</span>
+  </footer>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

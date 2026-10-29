@@ -6,20 +6,25 @@
       "orchestrator_host": "orchestrator.example.com",
       "domain": "orchestrator.example.com",
       "api_key_env": "ORCH_API_KEY",
+      "api_key": "",
       "verify_ssl": false,
+      "ca_bundle": "",
       "acme": {
-        "ca": "letsencrypt",
+        "ca": "letsencrypt_test",
         "email": "you@example.com",
         "key_type": "rsa2048"
       },
       "dns": {
-        "provider": "cloudflare"
+        "provider": "cloudflare",
+        "api_token": ""
       },
       "ssh": {
-        "user": "user",
+        "user": "admin",
         "key_path": "/data/ssh/orch_restart",
+        "known_hosts": "/data/ssh/known_hosts",
         "port": 22,
-        "restart_command": "/usr/sbin/service gms restart"
+        "restart_command": "sudo /bin/systemctl restart --no-block gms.service",
+        "nginx_reload_command": "sudo /bin/systemctl reload nginx"
       }
     }
   ]

@@ -1,181 +1,167 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{ 'Add' if is_new else 'Edit' }} server · Orchestrator ACME Cert Manager</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-</head>
-<body>
-  <header>
-    <div class="wrap headbar">
-      <div>
-        <h1>Orchestrator <span>ACME Cert Manager</span></h1>
-        <div class="meta">EdgeConnect Orchestrator &middot; TLS lifecycle &middot; {{ now }}</div>
-      </div>
-      <nav class="nav">
-        <a href="{{ url_for('index') }}">Dashboard</a>
-        <a href="{{ url_for('settings') }}" class="active">Settings</a>
-        {% if current_user %}
-        <span class="nav-user">{{ current_user }}</span>
-        <a href="{{ url_for('logout') }}">Log out</a>
-        {% endif %}
-      </nav>
-    </div>
-  </header>
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% set nav = 'settings' %}
+{% block title %}{{ 'Add' if is_new else 'Edit' }} target · Orchestrator ACME Cert Manager{% endblock %}
+{% block pageclass %}narrow{% endblock %}
+{% block content %}
+  <div class="crumbs"><a href="{{ url_for('settings') }}">Settings</a> / {{ 'new target' if is_new else form.target_id }}</div>
+  <div class="section-head" style="margin-top:0"><h1 style="font-size:20px">{% if new_target_only %}Add a target to {{ form.name or form.id }}{% elif is_new %}Add server{% else %}Edit {{ form.target_id }}{% endif %}</h1></div>
 
-  <main class="wrap narrow">
-    <div class="section-head">
-      <h2>{{ 'Add server' if is_new else 'Edit ' + form.name }}</h2>
-      <a class="btn-link ghost" href="{{ url_for('settings') }}">&larr; Back</a>
-    </div>
+  {% if errors %}
+    <div class="errors"><strong>Please fix the following:</strong>
+      <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>
+  {% endif %}
 
-    {% if errors %}
-      <div class="errors">
-        <strong>Please fix the following:</strong>
-        <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
-      </div>
-    {% endif %}
+  <form method="post" action="{{ url_for('settings_save') }}" class="cfg-form" autocomplete="off" id="target-form">
+    {{ m.csrf() }}
+    {% if not is_new %}<input type="hidden" name="original_id" value="{{ form.target_id }}">{% endif %}
+    {% if new_target_only %}<input type="hidden" name="certificate_id" value="{{ form.id }}">{% endif %}
 
-    <form method="post" action="{{ url_for('settings_save') }}" class="cfg-form" autocomplete="off">
-      {% if not is_new %}<input type="hidden" name="original_id" value="{{ form.id }}">{% endif %}
-
-      <fieldset>
-        <legend>Identity</legend>
+    <fieldset>
+      <legend>Identity</legend>
+      <div class="grid2">
         <div class="field">
-          <label for="id">Server ID</label>
-          <input id="id" name="id" value="{{ form.id }}"
-                 {% if not is_new %}readonly class="ro"{% endif %} placeholder="orch-lab">
-          <p class="hint">{% if is_new %}Lowercase letters, numbers, hyphens, underscores. Cannot be changed later.{% else %}IDs are fixed once created.{% endif %}</p>
+          <label for="id">{{ 'Certificate / server ID' if not new_target_only else 'Certificate ID' }}</label>
+          <input id="id" name="id" value="{{ form.id }}" {% if not is_new or new_target_only %}readonly class="ro"{% endif %} placeholder="orch-lab">
+          <p class="hint">{% if is_new and not new_target_only %}Letters, numbers, hyphens, underscores. Also the first target's ID. Cannot be changed later.{% else %}IDs are fixed once created.{% endif %}</p>
         </div>
         <div class="field">
           <label for="name">Display name</label>
-          <input id="name" name="name" value="{{ form.name }}" placeholder="Lab Orchestrator">
+          <input id="name" name="name" value="{{ form.name }}" placeholder="Lab Orchestrator" {% if new_target_only %}readonly class="ro"{% endif %}>
         </div>
-      </fieldset>
+      </div>
+      {% if new_target_only or (not is_new and form.target_id != form.id) %}
+      <div class="grid2">
+        <div class="field">
+          <label for="target_id">Target ID</label>
+          <input id="target_id" name="target_id" value="{{ form.target_id }}" {% if not is_new %}readonly class="ro"{% endif %} placeholder="orch-lab-nginx">
+          <p class="hint">Its own ID; shown as a separate row on the Fleet page.</p>
+        </div>
+        <div class="field">
+          <label for="target_name">Target name</label>
+          <input id="target_name" name="target_name" value="{{ form.target_name }}" placeholder="optional">
+        </div>
+      </div>
+      {% endif %}
+    </fieldset>
 
-      <fieldset>
-        <legend>Target</legend>
+    <fieldset {% if new_target_only %}class="ro-set"{% endif %}>
+      <legend>Certificate{% if sibling_count > 1 %} <span class="small muted">— shared by {{ sibling_count }} targets; changes apply to all</span>{% endif %}</legend>
+      {% if new_target_only %}<p class="hint">Issuance settings belong to the certificate; edit them from any of its targets.</p>{% endif %}
+      <div class="field">
+        <label for="domain">Certificate domain</label>
+        <input id="domain" name="domain" value="{{ form.domain }}" placeholder="defaults to the target host" {% if new_target_only %}readonly class="ro"{% endif %}>
+      </div>
+      <div class="grid2">
         <div class="field">
-          <label for="orchestrator_host">Orchestrator host</label>
-          <input id="orchestrator_host" name="orchestrator_host" value="{{ form.orchestrator_host }}"
-                 placeholder="orchestrator.example.com">
-        </div>
-        <div class="field">
-          <label for="domain">Certificate domain</label>
-          <input id="domain" name="domain" value="{{ form.domain }}" placeholder="defaults to the host above">
-          <p class="hint">The hostname the certificate is issued for. Leave blank to match the host.</p>
-        </div>
-        <div class="field check">
-          <label><input type="checkbox" name="verify_ssl" {% if form.verify_ssl %}checked{% endif %}> Verify the Orchestrator's TLS cert on API calls</label>
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>Certificate authority</legend>
-        <div class="field">
-          <label for="acme_ca">CA</label>
-          <select id="acme_ca" name="acme_ca">
-            {% for value, label in ca_choices %}
-            <option value="{{ value }}" {% if form.acme_ca == value %}selected{% endif %}>{{ label }}</option>
-            {% endfor %}
+          <label for="acme_ca">CA {{ m.info('Let\'s Encrypt needs nothing on the host. The lab CA must be initialised on the Docker host first; its identity is pinned there and written to .env.', './setup.sh --with-ca --lab-domain <zone>') }}</label>
+          {% set preset = form.acme_ca in (ca_choices|map(attribute=0)|list) %}
+          <select id="acme_ca" name="acme_ca" {% if new_target_only %}disabled{% endif %}>
+            {% for value, label in ca_choices %}<option value="{{ value }}" {% if form.acme_ca == value %}selected{% endif %}>{{ label }}{% if value == 'lab' and not lab_ca.available %} — not initialised on this host{% endif %}</option>{% endfor %}
+            {% if not preset and form.acme_ca %}<option value="{{ form.acme_ca }}" selected>Custom directory: {{ form.acme_ca }}</option>{% endif %}
           </select>
-          <p class="hint">Staging has high rate limits but issues browser-untrusted certs &mdash; use it to test, then switch to production.</p>
-        </div>
-        <div class="field">
-          <label for="acme_email">ACME email</label>
-          <input id="acme_email" name="acme_email" type="email" value="{{ form.acme_email }}"
-                 placeholder="you@example.com">
+          <input id="acme_ca_url" name="acme_ca_url" value="" placeholder="or an https:// ACME directory URL (ZeroSSL, Sectigo, an internal CA)" {% if new_target_only %}disabled{% endif %} style="margin-top:6px">
+          {% if new_target_only %}<input type="hidden" name="acme_ca" value="{{ form.acme_ca }}">{% endif %}
+          <p class="hint">Staging has high rate limits but issues browser-untrusted certs. Test there, then switch to production. <strong>Lab CA</strong> issues from the bundled step-ca (DNS-01 via Cloudflare, names under the lab domain only); clients must trust its root.</p>
+          <p class="lab-state">
+            {% if lab_ca.available %}<span class="check good"><span class="g">●</span>Lab CA ready at <span class="mono">{{ lab_ca.url }}</span></span>
+            {% elif lab_ca.configured %}<span class="check bad"><span class="g">✕</span>Lab CA configured (<span class="mono">{{ lab_ca.url }}</span>) but its root is not readable in the container</span> {{ m.info('The ./data/pki/certs mount is missing or the init did not finish.', './setup.sh --with-ca && docker compose down && docker compose up -d') }}
+            {% else %}<span class="muted">Lab CA not configured on this host</span> {{ m.info('Initialise it on the Docker host, then select it here. The System page shows its state once configured.', './setup.sh --with-ca --lab-domain <zone> && docker compose up -d') }}{% endif %}
+          </p>
         </div>
         <div class="field">
           <label for="key_type">Key type</label>
-          <select id="key_type" name="key_type">
-            {% for k in key_choices %}
-            <option value="{{ k }}" {% if form.key_type == k %}selected{% endif %}>{{ k }}</option>
-            {% endfor %}
+          <select id="key_type" name="key_type" {% if new_target_only %}disabled{% endif %}>
+            {% for k in key_choices %}<option value="{{ k }}" {% if form.key_type == k %}selected{% endif %}>{{ k }}</option>{% endfor %}
           </select>
-          <p class="hint">Orchestrator serves a single RSA certificate.</p>
+          {% if new_target_only %}<input type="hidden" name="key_type" value="{{ form.key_type }}">{% endif %}
         </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>DNS (Cloudflare)</legend>
+      </div>
+      <div class="field">
+        <label for="acme_email">ACME email</label>
+        <input id="acme_email" name="acme_email" type="email" value="{{ form.acme_email }}" placeholder="you@example.com" {% if new_target_only %}readonly class="ro"{% endif %}>
+      </div>
+      <div class="grid2">
         <div class="field">
-          <label for="dns_provider">DNS provider</label>
-          <input id="dns_provider" name="dns_provider" value="{{ form.dns_provider }}">
-          <p class="hint">Only <code>cloudflare</code> is wired up today.</p>
+          <label for="dns_provider">DNS provider (Lego code)</label>
+          <input id="dns_provider" name="dns_provider" value="{{ form.dns_provider or 'cloudflare' }}" placeholder="cloudflare" {% if new_target_only %}readonly class="ro"{% endif %}>
+          <p class="hint"><code>cloudflare</code> uses the token below. Any other <a href="https://go-acme.github.io/lego/dns/" target="_blank" rel="noopener">Lego DNS provider</a> takes its variables on the right.</p>
         </div>
         <div class="field">
           <label for="dns_api_token">Cloudflare API token</label>
-          <input id="dns_api_token" name="dns_api_token" type="password" autocomplete="new-password" value="">
-          <p class="hint">
-            {% if cf_token_set %}<span class="stored">A token is stored.</span> Leave blank to keep it, or type a new one to replace it.
-            {% else %}Scoped to edit DNS on the zone. Leave blank to fall back to the <code>CF_DNS_API_TOKEN</code> env var.{% endif %}
-          </p>
+          <input id="dns_api_token" name="dns_api_token" type="password" autocomplete="new-password" value="" {% if new_target_only %}disabled{% endif %}>
+          <p class="hint">{% if cf_token_set %}<span class="stored">A token is stored.</span> Leave blank to keep it, or type a new one to replace it.
+            {% else %}Scoped to edit DNS on the zone. Blank falls back to the <code>CF_DNS_API_TOKEN</code> env var
+            ({% if cf_env_set %}<span class="stored">set on the host</span>{% else %}<strong>not set on the host</strong>{% endif %}).{% endif %}
+            {{ m.info('The fallback lives in .env on the Docker host and needs a restart to change; a value entered here is stored in servers.json (mode 600) and wins.', 'CF_DNS_API_TOKEN=… in .env; docker compose down && docker compose up -d') }}</p>
         </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>Orchestrator API</legend>
-        <div class="field">
-          <label for="api_key">API key</label>
-          <input id="api_key" name="api_key" type="password" autocomplete="new-password" value="">
-          <p class="hint">
-            {% if api_key_set %}<span class="stored">A key is stored.</span> Leave blank to keep it, or type a new one to replace it.
-            {% else %}Read-Write Orchestrator API key. Leave blank to fall back to the env var named below.{% endif %}
-          </p>
-        </div>
-        <div class="field">
-          <label for="api_key_env">API key env var (fallback)</label>
-          <input id="api_key_env" name="api_key_env" value="{{ form.api_key_env }}">
-          <p class="hint">Used only when the API key above is left blank.</p>
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>SSH (activation restart)</legend>
-        <div class="grid2">
-          <div class="field">
-            <label for="ssh_user">SSH user</label>
-            <input id="ssh_user" name="ssh_user" value="{{ form.ssh_user }}">
-          </div>
-          <div class="field">
-            <label for="ssh_port">SSH port</label>
-            <input id="ssh_port" name="ssh_port" value="{{ form.ssh_port }}">
-          </div>
-        </div>
-        <div class="field">
-          <label for="ssh_key_path">SSH key path</label>
-          <input id="ssh_key_path" name="ssh_key_path" value="{{ form.ssh_key_path }}"
-                 placeholder="/home/azureuser/.ssh/orch_restart">
-        </div>
-        <details class="advanced">
-          <summary>Advanced</summary>
-          <div class="field">
-            <label for="ssh_known_hosts">Known hosts path</label>
-            <input id="ssh_known_hosts" name="ssh_known_hosts" value="{{ form.ssh_known_hosts }}">
-          </div>
-          <div class="field">
-            <label for="restart_command">Restart command</label>
-            <input id="restart_command" name="restart_command" value="{{ form.restart_command }}">
-          </div>
-          <div class="field">
-            <label for="nginx_reload_command">Nginx reload command</label>
-            <input id="nginx_reload_command" name="nginx_reload_command" value="{{ form.nginx_reload_command }}">
-          </div>
-        </details>
-      </fieldset>
-
-      <div class="form-actions">
-        <button type="submit">{{ 'Create server' if is_new else 'Save changes' }}</button>
-        <a class="btn-link ghost" href="{{ url_for('settings') }}">Cancel</a>
       </div>
-    </form>
-  </main>
+      <div class="field">
+        <label for="dns_env">Provider variables (one <code>KEY=value</code> per line)</label>
+        <textarea id="dns_env" name="dns_env" rows="3" placeholder="AWS_ACCESS_KEY_ID=…&#10;AWS_SECRET_ACCESS_KEY=…" {% if new_target_only %}readonly class="ro"{% endif %}>{{ form.dns_env }}</textarea>
+        <p class="hint">Passed to Lego's environment for the provider above; stored with the other inline secrets and never shown again. A stored variable is listed with an empty value: leave it empty to keep it, type a value to replace it, delete the line to remove it.</p>
+      </div>
+    </fieldset>
 
-  <footer class="wrap">
-    <span>orchestrator-acme-cert-manager</span>
-    <span class="muted">Internal lab/training use</span>
-  </footer>
-</body>
-</html>
+    <fieldset>
+      <legend>Target</legend>
+      <div class="field">
+        <label for="driver">Driver</label>
+        <select id="driver" name="driver" {% if not is_new %}disabled{% endif %}>
+          {% for d in drivers %}<option value="{{ d.name }}" {% if driver == d.name %}selected{% endif %}>{{ d.label }}</option>{% endfor %}
+        </select>
+        {% if not is_new %}<input type="hidden" name="driver" value="{{ driver }}">{% endif %}
+        <p class="hint">What the certificate is deployed to and how it is activated and verified. Fixed once the target exists.</p>
+      </div>
+    </fieldset>
+
+    {% for d in drivers %}
+    <div class="driver-section" data-driver="{{ d.name }}" {% if d.name != driver %}hidden{% endif %}>
+      {% for group, fields in d.groups %}
+      {% set adv = fields|selectattr('advanced')|list %}
+      {% set plain = fields|rejectattr('advanced')|list %}
+      <fieldset>
+        <legend>{{ group }}</legend>
+        {% for f in plain %}{{ field_row(f, d.name) }}{% endfor %}
+        {% if adv %}
+        <details class="advanced"><summary>Advanced</summary>
+          {% for f in adv %}{{ field_row(f, d.name) }}{% endfor %}
+        </details>
+        {% endif %}
+      </fieldset>
+      {% endfor %}
+    </div>
+    {% endfor %}
+
+    <div class="form-actions">
+      <button type="submit" class="btn">{{ 'Create' if is_new else 'Save changes' }}</button>
+      <a class="btn ghost" href="{{ url_for('settings') }}">Cancel</a>
+    </div>
+  </form>
+{% endblock %}
+
+{% macro field_row(f, dname) -%}
+  {% set active = (dname == driver) %}
+  {% set val = form[f.name] if (active and f.name in form) else f.default %}
+  <div class="field{% if f.kind == 'checkbox' %} check{% endif %}">
+    {% if f.kind == 'checkbox' %}
+      <label><input type="checkbox" name="{{ f.name }}" {% if val %}checked{% endif %} {% if not active %}disabled{% endif %}> {{ f.label }}{% if f.via_text %} {{ m.info(f.via_text, f.via) }}{% endif %}</label>
+      {% if f.help %}<p class="hint">{{ f.help }}</p>{% endif %}
+    {% else %}
+      <label for="{{ dname }}-{{ f.name }}">{{ f.label }}{% if f.via_text %} {{ m.info(f.via_text, f.via) }}{% endif %}</label>
+      {% if f.kind == 'select' %}
+        <select id="{{ dname }}-{{ f.name }}" name="{{ f.name }}" {% if not active %}disabled{% endif %}>
+          {% for v, l in f.choices %}<option value="{{ v }}" {% if val == v %}selected{% endif %}>{{ l }}</option>{% endfor %}
+        </select>
+      {% elif f.kind == 'textarea' %}
+        <textarea id="{{ dname }}-{{ f.name }}" name="{{ f.name }}" rows="3" {% if not active %}disabled{% endif %}>{{ val }}</textarea>
+      {% elif f.kind == 'password' %}
+        <input id="{{ dname }}-{{ f.name }}" name="{{ f.name }}" type="password" autocomplete="new-password" value="" {% if not active %}disabled{% endif %}>
+      {% else %}
+        <input id="{{ dname }}-{{ f.name }}" name="{{ f.name }}" value="{{ val }}" {% if f.kind == 'number' %}inputmode="numeric"{% endif %} {% if not active %}disabled{% endif %}>
+      {% endif %}
+      <p class="hint">{% if f.secret and stored_secrets.get(f.name) %}<span class="stored">A value is stored.</span> Leave blank to keep it, or type a new one to replace it. {% endif %}{{ f.help }}
+        {% if f.name == 'api_key' and not stored_secrets.get('api_key') %}Blank falls back to the env var below ({% if api_env_set %}<span class="stored">set on the host</span>{% else %}<strong>not set on the host</strong>{% endif %}).{% endif %}</p>
+    {% endif %}
+  </div>
+{%- endmacro %}

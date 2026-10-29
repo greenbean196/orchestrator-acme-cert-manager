@@ -1,0 +1,6 @@
+# Only what the image needs reaches the builder: never secrets, keys, state or the venv.
+*
+!app/
+!config/crontab
+!requirements.txt
+app/**/__pycache__/

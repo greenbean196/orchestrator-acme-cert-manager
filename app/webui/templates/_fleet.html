@@ -1,0 +1,114 @@
+{% import "_macros.html" as m with context %}
+<div data-busy="{{ '1' if busy else '0' }}">
+  {% set s = summary %}
+  <div class="tiles">
+    <div class="tile t-accent"><div class="label">Targets</div><div class="value num">{{ s.servers }}</div>
+      <div class="sub">{% if s.working %}{{ m.status('working', s.working ~ ' running') }}{% else %}<span class="muted">idle</span>{% endif %}</div></div>
+    <div class="tile {{ 't-good' if s.healthy == s.servers and s.servers else 't-quiet' }}"><div class="label">Healthy</div><div class="value num">{{ s.healthy }}<small>/ {{ s.servers }}</small></div>
+      <div class="sub muted">issued cert is live</div></div>
+    <div class="tile {{ 't-crit' if s.attention else 't-quiet' }}"><div class="label">Need attention</div><div class="value num">{{ s.attention }}</div>
+      <div class="sub muted">failed, pending, expiring or invalid</div></div>
+    <div class="tile {{ 't-warn' if s.expiring else 't-quiet' }}"><div class="label">In renewal window</div><div class="value num">{{ s.expiring }}</div>
+      <div class="sub muted">a third of lifetime left</div></div>
+    <div class="tile {{ 't-warn' if (s.min_days is not none and s.min_days <= 30) else 't-quiet' }}"><div class="label">Soonest expiry</div>
+      <div class="value num">{% if s.min_days is none %}—{% else %}{{ s.min_days }}<small>days</small>{% endif %}</div>
+      <div class="sub muted">across the fleet</div></div>
+  </div>
+
+  {% if system.problems %}
+  <div class="section">
+    <div class="alert {{ 'a-crit' if system.findings|selectattr('level','equalto','fatal')|list else 'a-warn' }}">
+      <strong>System checks</strong>
+      <ul>{% for p in system.problems %}<li><span class="mono small">[{{ p.code }}]</span> {{ p.message }}</li>{% endfor %}</ul>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="section">
+    <div class="section-head"><h2>Targets</h2>
+      <span class="small muted">sorted by health · click a row for detail</span></div>
+    <div class="panel table-wrap">
+      {% if not rows %}
+        <p class="empty">No targets configured. <a href="{{ url_for('settings_new') }}">Add one in Settings</a>.</p>
+      {% else %}
+      <table class="grid">
+        <thead><tr>
+          <th>Health</th><th>Target</th><th>CA</th><th>Issued</th><th>Served</th><th>Activation</th><th>Last run</th><th class="right">Actions</th>
+        </tr></thead>
+        <tbody>
+        {% for r in rows %}
+          {% set c = r.cert %}{% set h = r.health %}{% set lc = r.lifecycle %}
+          <tr class="row-link" onclick="if(!event.target.closest('form,a,button'))window.location='{{ url_for('server_detail', server_id=r.id) }}'">
+            <td>{{ m.status(h.state, h.label) }}
+              {% if h.state in ('critical','warning') %}<div class="secondary">{{ h.reasons|first }}</div>{% endif %}
+              {% if r.notice %}<div class="secondary"><span class="pill bad">notice</span> {{ r.notice }}</div>{% endif %}</td>
+            <td><a class="primary" href="{{ url_for('server_detail', server_id=r.id) }}">{{ r.name }}</a> {{ m.driver_pill(r.driver, r.driver_label) }}
+              <div class="secondary mono host">{{ r.host }}{% if r.domain != r.host %} · {{ r.domain }}{% endif %}{% if r.siblings %} · <span title="other targets of this certificate">+{{ r.siblings|length }} target{{ 's' if r.siblings|length != 1 }}</span>{% endif %}</div></td>
+            <td>{{ m.env_pill(r.ca_env) }}</td>
+            <td>{% if c.present %}{{ m.serial(c.serial) }} {{ m.env_pill(c.environment) }}
+                  <div class="secondary">{% if c.days_left is not none %}{% if c.days_left < 0 %}expired{% else %}{{ c.days_left }} d left{% endif %} · {% endif %}{{ c.not_after }}</div>
+                {% else %}<span class="muted">none</span>{% endif %}</td>
+            <td>{% if r.served.present %}{{ m.serial(r.served.serial) }} {{ m.env_pill(r.served.environment) }}{% if r.served.self_signed %} <span class="pill quiet" title="issuer equals subject">self-signed</span>{% endif %}
+                {% else %}<span class="muted" title="{{ r.served.error }}">unknown</span>{% endif %}</td>
+            <td>{% if lc.state == 'live' %}{{ m.status('ok', 'live') }}
+                {% elif lc.state == 'pending' %}{{ m.status('warning', 'pending') }}
+                {% elif lc.state == 'unknown' %}{{ m.status('unknown', 'unknown') }}
+                {% else %}{{ m.status('none', 'none') }}{% endif %}</td>
+            <td>{% if r.renewing %}{{ m.status('working', 'working') }}{% if r.run %}<div class="secondary kind">{{ r.run.kind }} · {{ r.run.actor or r.run.source or '?' }} · {{ relative_time(r.run.started) }}</div>{% endif %}
+                {% elif r.last %}{{ m.outcome(r.last) }}<div class="secondary kind">{{ r.last.kind }} · {{ r.last.ago }} · {{ m.who(r.last) }}</div>
+                {% else %}<span class="muted">never</span>{% endif %}</td>
+            <td><div class="actions">{{ m.action_buttons(r, 'fleet', 'sm') }}</div></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </div>
+    <p class="help"><strong>Force renew</strong> contacts the ACME CA (issue → deploy → activate on every target of the certificate). <strong>Force deploy</strong> reuses the issued certificate for this target (deploy → activate) and never contacts the CA. A scheduled run and a button never work on the same certificate at once.</p>
+  </div>
+
+  <div class="section">
+    <div class="section-head"><h2>Recent activity</h2></div>
+    <div class="panel table-wrap">
+      {% if not history %}<p class="empty">No runs yet.</p>{% else %}
+      <table class="grid">
+        <thead><tr><th>When</th><th>Certificate</th><th>Kind</th><th>By</th><th>Outcome</th><th>Steps</th><th>Result</th></tr></thead>
+        <tbody>
+        {% for h in history %}
+          <tr>
+            <td class="nowrap"><span title="{{ h.timestamp }}">{{ h.ago }}</span></td>
+            <td><a href="{{ url_for('server_detail', server_id=(h.targets|first) if h.targets else h.server_id) }}">{{ h.server_id }}</a></td>
+            <td><span class="pill quiet">{{ h.kind }}</span></td>
+            <td class="nowrap">{{ m.who(h) }}</td>
+            <td class="nowrap">{{ m.outcome(h) }}{% if h.elapsed_s %}<span class="secondary"> · {{ h.elapsed_s }}s</span>{% endif %}</td>
+            <td class="mono small nowrap">{% for st in h.steps %}<span class="{{ 'check good' if st.ok else 'check bad' }}" title="{{ st.target or '' }}">{{ st.step }}</span>{% if not loop.last %} → {% endif %}{% endfor %}</td>
+            <td class="msg small">{{ h.message or '—' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head"><h2>System</h2><a class="small" href="{{ url_for('system_page') }}">checks, environment, SSH material, lab CA →</a></div>
+    <div class="panel panel-body sys-strip">
+      <span>version <span class="mono">{{ system.version }}</span></span>
+      <span>config <span class="mono">{{ system.servers_file }}</span></span>
+      <span>history <span class="mono">{{ system.history_file }}</span></span>
+      <span>persistence
+        {% if system.config_mounted %}<span class="check good"><span class="g">●</span>bind-mounted</span>
+        {% elif system.config_mounted is sameas false %}<span class="check bad"><span class="g">✕</span>not mounted</span>
+        {% else %}<span class="muted">n/a outside a container</span>{% endif %}</span>
+      {% if system.scheduler and system.scheduler.next_run %}
+      <span>next scheduled run <span class="mono">{{ system.scheduler.next_run|replace('T',' ') }}</span>{% if system.scheduler.stale %} <span class="check bad"><span class="g">✕</span>scheduler stale</span>{% endif %}</span>
+      {% endif %}
+      {% if system.lab_ca and system.lab_ca.configured %}
+      <span>lab CA <span class="mono">{{ system.lab_ca.url }}</span> <span class="muted">root sha256</span> <span class="mono" title="{{ system.lab_ca.fingerprint }}">{{ system.lab_ca.fingerprint[:16] }}…</span></span>
+      {% else %}
+      <span>lab CA <span class="muted">not configured</span> {{ m.info('Initialised on the Docker host; the identity is pinned at init and written to .env.', './setup.sh --with-ca --lab-domain <zone>') }}</span>
+      {% endif %}
+    </div>
+  </div>
+</div>

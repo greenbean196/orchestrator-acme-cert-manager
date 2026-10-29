@@ -21,30 +21,44 @@ from .models import RenewalRecord
 
 log = logging.getLogger("notify")
 
-_WEBHOOK_URL = os.environ.get("NOTIFY_WEBHOOK_URL", "").strip()
-_NOTIFY_ON = os.environ.get("NOTIFY_ON", "failed").strip().lower()
 _TIMEOUT = 10
 
 
+def _settings() -> tuple[str, str]:
+    return (os.environ.get("NOTIFY_WEBHOOK_URL", "").strip(),
+            os.environ.get("NOTIFY_ON", "failed").strip().lower())
+
+
+def _redacted(url: str) -> str:
+    """scheme://host only: the path of a webhook URL is the credential."""
+    from urllib.parse import urlsplit
+    try:
+        u = urlsplit(url)
+        return f"{u.scheme}://{u.hostname}"
+    except ValueError:
+        return "<webhook>"
+
+
 def send(record: RenewalRecord) -> None:
-    if not _WEBHOOK_URL:
+    url, when = _settings()
+    if not url:
         log.debug("notify(%s): no webhook configured", record.server_id)
         return
 
     if record.outcome == "skipped":
         return
-    if record.outcome == "success" and _NOTIFY_ON != "all":
+    if record.outcome == "success" and when != "all":
         return
 
     text = _format(record)
     try:
-        resp = requests.post(_WEBHOOK_URL, json={"text": text}, timeout=_TIMEOUT)
+        resp = requests.post(url, json={"text": text}, timeout=_TIMEOUT, allow_redirects=False)
         if resp.status_code >= 300:
-            log.warning("notify(%s): webhook returned HTTP %s", record.server_id, resp.status_code)
+            log.warning("notify(%s): webhook %s returned HTTP %s", record.server_id, _redacted(url), resp.status_code)
         else:
             log.info("notify(%s): sent %s alert", record.server_id, record.outcome)
     except requests.RequestException as exc:
-        log.warning("notify(%s): webhook post failed: %s", record.server_id, exc)
+        log.warning("notify(%s): webhook post to %s failed: %s", record.server_id, _redacted(url), exc.__class__.__name__)
 
 
 def _format(record: RenewalRecord) -> str:
@@ -54,11 +68,16 @@ def _format(record: RenewalRecord) -> str:
     }.get(record.outcome, f"Renewal {record.outcome}")
 
     lines = [f"{head}: {record.server_id}", f"time: {record.timestamp}"]
+    if record.actor or record.source:
+        lines.append(f"started by: {record.actor or '?'} via {record.source or '?'}")
+    if record.targets:
+        lines.append(f"targets: {', '.join(record.targets)}")
 
     if record.outcome == "failed":
         bad = next((s for s in record.steps if not s.get("ok", True)), None)
         if bad:
-            lines.append(f"failed at: {bad.get('step')} — {bad.get('message')}")
+            where = f" on target {bad['target']}" if bad.get("target") else ""
+            lines.append(f"failed at: {bad.get('step')}{where} — {bad.get('message')}")
     elif record.outcome == "success":
         if record.not_after:
             lines.append(f"new expiry: {record.not_after}")

@@ -1,47 +1,19 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Set up · Orchestrator ACME Cert Manager</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-</head>
-<body>
-  <header>
-    <div class="wrap">
-      <h1>Orchestrator <span>ACME Cert Manager</span></h1>
-      <div class="meta">EdgeConnect Orchestrator &middot; TLS lifecycle</div>
-    </div>
-  </header>
-
-  <main class="wrap auth-wrap">
-    <div class="auth-card">
-      <h2>Create the admin account</h2>
-      <p class="muted small">This is the first time the tool has run. Set up a single administrator to protect the dashboard and server settings.</p>
-      {% if errors %}
-        <div class="errors">
-          <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
-        </div>
-      {% endif %}
+{% extends "base.html" %}
+{% block title %}Setup · Orchestrator ACME Cert Manager{% endblock %}
+{% block content %}
+  {% import "_macros.html" as m with context %}
+  <div class="auth-wrap">
+    <div class="panel auth-card">
+      <h1>Create the admin account</h1>
+      <p class="small muted" style="margin:0 0 10px">One administrator protects the dashboard and settings. Choose a password of at least 8 characters.</p>
+      {% if errors %}<div class="errors"><ul style="margin:0">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
       <form method="post" action="{{ url_for('setup') }}" autocomplete="off">
-        <div class="field">
-          <label for="username">Username</label>
-          <input id="username" name="username" value="{{ username }}" autofocus>
-        </div>
-        <div class="field">
-          <label for="password">Password</label>
-          <input id="password" name="password" type="password" autocomplete="new-password">
-          <p class="hint">At least 8 characters.</p>
-        </div>
-        <div class="field">
-          <label for="confirm">Confirm password</label>
-          <input id="confirm" name="confirm" type="password" autocomplete="new-password">
-        </div>
-        <div class="form-actions">
-          <button type="submit">Create account</button>
-        </div>
+        {{ m.csrf() }}
+        <div class="field"><label for="username">Username</label><input id="username" name="username" value="{{ username }}" autofocus></div>
+        <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="new-password"></div>
+        <div class="field"><label for="confirm">Confirm password</label><input id="confirm" name="confirm" type="password" autocomplete="new-password"></div>
+        <div class="form-actions"><button type="submit" class="btn">Create account</button></div>
       </form>
     </div>
-  </main>
-</body>
-</html>
+  </div>
+{% endblock %}

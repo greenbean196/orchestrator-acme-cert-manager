@@ -1,38 +1,18 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign in · Orchestrator ACME Cert Manager</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-</head>
-<body>
-  <header>
-    <div class="wrap">
-      <h1>Orchestrator <span>ACME Cert Manager</span></h1>
-      <div class="meta">EdgeConnect Orchestrator &middot; TLS lifecycle</div>
-    </div>
-  </header>
-
-  <main class="wrap auth-wrap">
-    <div class="auth-card">
-      <h2>Sign in</h2>
+{% extends "base.html" %}
+{% block title %}Sign in · Orchestrator ACME Cert Manager{% endblock %}
+{% block content %}
+  {% import "_macros.html" as m with context %}
+  <div class="auth-wrap">
+    <div class="panel auth-card">
+      <h1>Sign in</h1>
       {% if error %}<div class="errors">{{ error }}</div>{% endif %}
       <form method="post" action="{{ url_for('login') }}" autocomplete="off">
+        {{ m.csrf() }}
         <input type="hidden" name="next" value="{{ next }}">
-        <div class="field">
-          <label for="username">Username</label>
-          <input id="username" name="username" autofocus>
-        </div>
-        <div class="field">
-          <label for="password">Password</label>
-          <input id="password" name="password" type="password" autocomplete="current-password">
-        </div>
-        <div class="form-actions">
-          <button type="submit">Sign in</button>
-        </div>
+        <div class="field"><label for="username">Username</label><input id="username" name="username" autofocus></div>
+        <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password"></div>
+        <div class="form-actions"><button type="submit" class="btn">Sign in</button></div>
       </form>
     </div>
-  </main>
-</body>
-</html>
+  </div>
+{% endblock %}

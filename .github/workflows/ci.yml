@@ -1,0 +1,153 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:           # release.yml reuses this workflow as its test gate
+
+permissions:
+  contents: read
+
+env:
+  STEP_CLI_VERSION: "0.31.0"
+  STEP_CA_IMAGE: "smallstep/step-ca:0.30.2"
+
+jobs:
+  version:
+    # __version__, the compose image tag and the CHANGELOG heading must agree on every PR.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 scripts/check-version.py
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install the pinned step CLI (the lab CA tests run it natively)
+        run: |
+          curl -fsSL -o /tmp/step.tgz "https://github.com/smallstep/cli/releases/download/v${STEP_CLI_VERSION}/step_linux_${STEP_CLI_VERSION}_amd64.tar.gz"
+          tar -xzf /tmp/step.tgz -C /tmp
+          sudo install -m 0755 "/tmp/step_${STEP_CLI_VERSION}/bin/step" /usr/local/bin/step
+          step version
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: python -m compileall -q app
+      - run: ruff check app tests
+      - run: python -m pytest -q
+        env:
+          REQUIRE_STEP_CLI: "1"   # the native lab CA tests must run, not skip
+
+  image:
+    # Builds the cert manager image the way `docker compose up --build` does and
+    # starts it once as the unprivileged user against a throwaway layout, so a
+    # Dockerfile or entrypoint regression fails here, not on an operator's host.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker build -t oacm-ci:test .
+      - name: Unprivileged container runs preflight and the CLI
+        run: |
+          set -euo pipefail
+          mkdir -p ci-config ci-data/certs ci-data/logs ci-data/ssh ci-data/pki/certs
+          cp config/servers.example.json ci-config/servers.json
+          docker run --rm -u "$(id -u):$(id -g)" -e STRICT_STARTUP=false -e IN_CONTAINER=true \
+            -v "$PWD/ci-config:/config" -v "$PWD/ci-data/certs:/data/certs" -v "$PWD/ci-data/logs:/data/logs" \
+            -v "$PWD/ci-data/ssh:/data/ssh:ro" oacm-ci:test python -m app.cli check | tee check.out
+          grep -q "Result: OK" check.out
+          docker run --rm oacm-ci:test sh -c 'id -u; lego --version; supercronic -version 2>&1 | head -1; supercronic -test /app/crontab; python -m app.cli --help >/dev/null'
+          docker run --rm oacm-ci:test id -u | grep -qx 10001
+
+  image-arm64:
+    # The release builds linux/arm64 too: cross-build it here and prove the arch-specific binaries
+    # inside really are arm64 (a defaulted TARGETARCH once shipped amd64 lego in the arm64 image).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - run: docker buildx build --platform linux/arm64 --load -t oacm-ci:arm64 .
+      - run: |
+          docker run --rm --platform linux/arm64 oacm-ci:arm64 sh -c 'uname -m; lego --version; supercronic -version' | tee arm64.out
+          grep -q 'aarch64' arm64.out && grep -q 'linux/arm64' arm64.out
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - run: bash -n setup.sh upgrade-check.sh pki/lab-ca-init.sh && dash -n app/entrypoint.sh && shellcheck -S warning setup.sh upgrade-check.sh pki/lab-ca-init.sh && shellcheck -S warning -s sh app/entrypoint.sh
+
+  lab-ca-smoke:
+    # Starts the real step-ca container the way setup.sh does: init on a
+    # non-default port with the root kept offline, bring the service up with the
+    # compose profile, wait for the health check, hit the ACME directory and
+    # the CRL by the CA's constrained name. No ACME issuance (needs DNS-01).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Initialise the lab CA in the pinned image
+        run: |
+          set -euo pipefail
+          mkdir -p data/pki data/pki-root data/certs data/logs data/ssh config
+          chmod 700 data/pki-root
+          docker run --rm --entrypoint bash -u "$(id -u):$(id -g)" \
+            -e STEPPATH=/home/step -e HOME=/home/step -e OFFLINE=/root-offline \
+            -e LAB_CA_NAME="Lab CA" -e LAB_CA_HOST=ca.lab.example.net -e LAB_CA_DOMAIN=lab.example.net -e LAB_CA_PORT=9443 \
+            -v "$PWD/data/pki:/home/step" -v "$PWD/data/pki-root:/root-offline" -v "$PWD/pki:/pki-init:ro" \
+            "$STEP_CA_IMAGE" /pki-init/lab-ca-init.sh
+          test ! -e data/pki/secrets/root_ca_key
+          test -f data/pki-root/root_ca_key
+          test -f data/pki/certs/root-key-offline
+          grep -q '^LAB_CA_PORT=9443$' data/pki/config/lab-ca.meta
+          grep -q '"idpURL": "https://ca.lab.example.net:9443/1.0/crl"' data/pki/config/ca.json
+      - name: Re-run is a no-op; drift is refused
+        run: |
+          set -euo pipefail
+          run() { docker run --rm --entrypoint bash -u "$(id -u):$(id -g)" -e STEPPATH=/home/step -e HOME=/home/step -e OFFLINE=/root-offline \
+                    -e LAB_CA_NAME="Lab CA" -e LAB_CA_HOST="$1" -e LAB_CA_DOMAIN="$2" -e LAB_CA_PORT="$3" \
+                    -v "$PWD/data/pki:/home/step" -v "$PWD/data/pki-root:/root-offline" -v "$PWD/pki:/pki-init:ro" "$STEP_CA_IMAGE" /pki-init/lab-ca-init.sh; }
+          run ca.lab.example.net lab.example.net 9443 | grep -q "nothing to do"
+          if run ca.other.example.net other.example.net 9443; then echo "drift was not refused"; exit 1; fi
+      - name: Start the service and wait for a healthy container
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          printf 'COMPOSE_PROFILES=lab-ca\nLAB_CA_HOST=ca.lab.example.net\nLAB_CA_DOMAIN=lab.example.net\nLAB_CA_PORT=9443\nLAB_CA_UID=%s\nLAB_CA_GID=%s\n' "$(id -u)" "$(id -g)" >> .env
+          docker compose up -d lab-ca
+          for _ in $(seq 1 40); do
+            s="$(docker inspect --format '{{.State.Health.Status}}' lab-ca)"
+            [ "$s" = "healthy" ] && break
+            sleep 3
+          done
+          docker inspect --format '{{.State.Health.Status}}' lab-ca | tee /dev/stderr | grep -qx healthy
+      - name: ACME directory, root and CRL by the constrained name on port 9443
+        run: |
+          set -euo pipefail
+          echo "127.0.0.1 ca.lab.example.net" | sudo tee -a /etc/hosts >/dev/null
+          curl -fsS --cacert data/pki/certs/root_ca.crt https://ca.lab.example.net:9443/acme/lab/directory | grep -q newOrder
+          curl -fsS --cacert data/pki/certs/root_ca.crt https://ca.lab.example.net:9443/roots.pem | grep -q 'BEGIN CERTIFICATE'
+          curl -fsS --cacert data/pki/certs/root_ca.crt -o /tmp/crl.der https://ca.lab.example.net:9443/1.0/crl
+          openssl crl -inform DER -in /tmp/crl.der -noout -issuer
+          openssl x509 -in data/pki/certs/intermediate_ca.crt -noout -text | grep -A2 'Name Constraints'
+      - name: Logs on failure
+        if: failure()
+        run: |
+          docker logs lab-ca 2>&1 | tail -50 || true
+          ls -la data/pki data/pki/config data/pki/secrets data/pki-root 2>/dev/null || true
+          sed -n '1,12p' data/pki/config/ca.json 2>/dev/null || true

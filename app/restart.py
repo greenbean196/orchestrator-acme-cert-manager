@@ -13,8 +13,7 @@ Key facts learned in the lab:
 from __future__ import annotations
 
 import logging
-import os
-import shutil
+import socket
 import ssl
 import time
 from pathlib import Path
@@ -22,7 +21,8 @@ from pathlib import Path
 import paramiko
 from cryptography import x509
 
-from . import config, deploy
+from . import config, deploy, sshcheck
+from .drivers import base as drv
 from .models import ServerConfig, StepResult
 
 log = logging.getLogger("restart")
@@ -37,6 +37,10 @@ _ROLLBACK_POLL_TIMEOUT = 120
 
 def restart(server: ServerConfig) -> StepResult:
     """Reload so the new cert is served; verify; roll back to last-good on failure."""
+    pre = preflight(server)
+    if pre is not None:
+        return pre
+
     try:
         want_serial = _deployed_serial(server)
     except (FileNotFoundError, ValueError) as exc:
@@ -64,21 +68,36 @@ def restart(server: ServerConfig) -> StepResult:
 
 # --------------------------------------------------------------------------- apply / ssh
 
+def preflight(server: ServerConfig) -> StepResult | None:
+    """Static SSH configuration check; None when everything looks usable."""
+    problems = sshcheck.validate(server)
+    if not problems:
+        return None
+    return StepResult(STEP, ok=False,
+                      message=f"SSH configuration invalid for {server.id}: " + " | ".join(problems),
+                      detail={"phase": "preflight", "problems": problems})
+
+
 def _apply(server: ServerConfig) -> StepResult:
     client, err = _open(server)
     if err:
         return err
     try:
-        if server.restart_command:
-            rc, out, e = _run(client, server.restart_command)
+        for label, cmd in (("restart", server.restart_command),
+                           ("nginx reload", server.nginx_reload_command)):
+            if not cmd:
+                continue
+            try:
+                rc, out, e = _run(client, cmd)
+            except (paramiko.SSHException, socket.timeout, OSError) as exc:
+                return StepResult(STEP, ok=False,
+                                  message=f"{label} command could not be run over SSH: {exc}",
+                                  detail={"phase": label, "command": cmd})
             if rc != 0:
-                return StepResult(STEP, ok=False, message=f"restart command exited {rc}",
-                                  detail={"stderr": e[:2000], "stdout": out[:2000]})
-        if server.nginx_reload_command:
-            rc, out, e = _run(client, server.nginx_reload_command)
-            if rc != 0:
-                return StepResult(STEP, ok=False, message=f"nginx reload exited {rc}",
-                                  detail={"stderr": e[:2000], "stdout": out[:2000]})
+                return StepResult(STEP, ok=False,
+                                  message=f"{label} command exited {rc}: {_first_line(e or out)}",
+                                  detail={"phase": label, "command": cmd, "exit": rc,
+                                          "stderr": e[:2000], "stdout": out[:2000]})
     finally:
         client.close()
     return StepResult(STEP, ok=True, message="applied")
@@ -92,46 +111,47 @@ def _reload_nginx(server: ServerConfig) -> StepResult:
         return err
     try:
         rc, out, e = _run(client, server.nginx_reload_command)
+    except (paramiko.SSHException, socket.timeout, OSError) as exc:
+        return StepResult(STEP, ok=False, message=f"nginx reload could not be run over SSH: {exc}")
     finally:
         client.close()
     if rc != 0:
-        return StepResult(STEP, ok=False, message=f"nginx reload exited {rc}",
+        return StepResult(STEP, ok=False, message=f"nginx reload exited {rc}: {_first_line(e or out)}",
                           detail={"stderr": e[:2000]})
     return StepResult(STEP, ok=True, message="reloaded")
 
 
 def _open(server: ServerConfig):
-    """Return (client, None) or (None, StepResult-error)."""
-    known_hosts = getattr(server, "ssh_known_hosts", "") or "/data/ssh/known_hosts"
-    client = paramiko.SSHClient()
+    """Return (client, None) or (None, StepResult-error) with an operator-facing message."""
     try:
-        client.load_host_keys(known_hosts)
-    except (FileNotFoundError, OSError) as exc:
-        return None, StepResult(STEP, ok=False,
-                                message=f"known_hosts not found at {known_hosts}: {exc}")
-    client.set_missing_host_key_policy(paramiko.RejectPolicy())
-    try:
-        client.connect(hostname=server.orchestrator_host, port=server.ssh_port,
-                       username=server.ssh_user, key_filename=server.ssh_key_path,
-                       timeout=_SSH_TIMEOUT, allow_agent=False, look_for_keys=False)
-    except paramiko.SSHException as exc:
-        return None, StepResult(STEP, ok=False, message=f"SSH connect/host-key failure: {exc}")
-    except OSError as exc:
-        return None, StepResult(STEP, ok=False, message=f"SSH connection failed: {exc}")
-    return client, None
+        return sshcheck.open_client(server), None
+    except sshcheck.SSHConfigError as exc:
+        return None, StepResult(STEP, ok=False, message=str(exc), detail={"phase": "connect"})
 
 
 def _run(client: paramiko.SSHClient, cmd: str):
     log.info("restart: running %r", cmd)
-    stdin, stdout, stderr = client.exec_command(cmd, timeout=_CMD_TIMEOUT)
-    rc = stdout.channel.recv_exit_status()
-    return rc, stdout.read().decode(errors="replace").strip(), stderr.read().decode(errors="replace").strip()
+    return sshcheck.run(client, cmd, timeout=_CMD_TIMEOUT)
+
+
+def _first_line(text: str) -> str:
+    """The last non-empty line: wrappers such as `service` print 'Redirecting to ...' first
+    and the real error last. The full output stays in the step detail."""
+    lines = [ln for ln in (text or "").strip().splitlines() if ln.strip()]
+    return lines[-1] if lines else "no output"
+
+
+_last_line = _first_line
 
 
 # --------------------------------------------------------------------------- rollback
 
 def _rollback_dir(server: ServerConfig) -> Path:
-    return config.cert_dir_for(server) / "rollback"
+    """rollback/ for the 1:1 entry; rollback/<target id>/ for an additional Orchestrator target on the same certificate."""
+    d = config.cert_dir_for(server) / "rollback"
+    if server.certificate_id and server.certificate_id != server.id:
+        d = d / server.id
+    return d
 
 
 def _rollback_files(server: ServerConfig):
@@ -142,14 +162,10 @@ def _rollback_files(server: ServerConfig):
 def _promote_known_good(server: ServerConfig) -> None:
     """Copy the just-verified cert into rollback/ as the new last-known-good."""
     src = config.cert_dir_for(server)
-    d = _rollback_dir(server)
-    d.mkdir(parents=True, exist_ok=True)
     try:
-        shutil.copyfile(src / f"{server.domain}.cer", d / f"{server.domain}.cer")
-        shutil.copyfile(src / f"{server.domain}.key", d / f"{server.domain}.key")
-        shutil.copyfile(src / "ca.cer", d / "ca.cer")
-        os.chmod(d / f"{server.domain}.key", 0o600)
-    except OSError as exc:
+        drv.promote_snapshot(_rollback_dir(server), drv.CertBundle.from_paths(
+            src / f"{server.domain}.cer", src / f"{server.domain}.key", src / "ca.cer"))
+    except (OSError, ValueError) as exc:
         log.warning("could not save known-good cert for %s: %s", server.id, exc)
 
 
@@ -160,6 +176,23 @@ def _attempt_rollback(server: ServerConfig, failed_serial: int) -> StepResult:
                           message="activation failed and no previous certificate exists to roll back to",
                           detail={"rolled_back": False, "reason": "no known-good snapshot",
                                   "failed_serial": format(failed_serial, "x")})
+
+    snap = drv.CertBundle.from_paths(cert, key, ca)
+    failed = drv.CertBundle.for_certificate(server)
+    if snap.serial and snap.serial == failed_serial:
+        return StepResult(STEP, ok=False,
+                          message=("activation did not verify; the certificate on disk is already the last-known-good "
+                                   "one, so there is nothing to roll back to. Check the reload command and that "
+                                   "orchestrator_host is the appliance you expect."),
+                          detail={"rolled_back": False, "reason": "snapshot equals the failed certificate",
+                                  "failed_serial": format(failed_serial, "x")})
+    refusal = drv.cross_environment_refusal(server.to_target(), snap, failed)
+    if refusal:
+        log.error("restart(%s): %s", server.id, refusal)
+        return StepResult(STEP, ok=False, message=refusal,
+                          detail={"rolled_back": False, "reason": "cross-environment rollback refused",
+                                  "failed_serial": format(failed_serial, "x"), "snapshot_serial": snap.serial_hex,
+                                  "snapshot_environment": snap.environment, "failed_environment": failed.environment})
 
     log.warning("restart(%s): activation failed — rolling back to last-known-good", server.id)
     dres = deploy.deploy_paths(server, cert, key, ca)
@@ -176,13 +209,19 @@ def _attempt_rollback(server: ServerConfig, failed_serial: int) -> StepResult:
 
     prev_serial = _deployed_serial_from(cert)
     ok, _ = _wait_for_served_serial(server, prev_serial, _ROLLBACK_POLL_TIMEOUT)
+    crossed = bool(snap.environment and failed.environment and snap.environment != failed.environment)
+    msg = ("activation verification failed — rolled back to previous certificate" if ok
+           else "activation failed and rollback did not verify")
+    if ok and crossed:
+        msg += (f" (CROSS-ENVIRONMENT: restored a {snap.environment} certificate in place of a "
+                f"{failed.environment} one, as allowed by this target's rollback policy)")
     return StepResult(STEP, ok=False,
-                      message=("activation verification failed — rolled back to previous certificate"
-                               if ok else
-                               "activation failed and rollback did not verify"),
+                      message=msg,
                       detail={"rolled_back": ok,
                               "restored_serial": format(prev_serial, "x"),
-                              "failed_serial": format(failed_serial, "x")})
+                              "failed_serial": format(failed_serial, "x"),
+                              "cross_environment": crossed,
+                              "snapshot_environment": snap.environment})
 
 
 # --------------------------------------------------------------------------- cert helpers

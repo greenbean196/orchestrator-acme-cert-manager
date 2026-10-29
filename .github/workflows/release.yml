@@ -1,0 +1,135 @@
+name: release
+
+# Tag v* -> verify -> test -> build + push multi-arch image to GHCR -> attest -> GitHub Release.
+# Single source of truth for the version is __version__ in app/__init__.py.
+on:
+  push:
+    tags: ["v*"]
+
+# Deny by default; each job asks for exactly what it needs.
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false      # never kill a half-published release
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0              # needed to prove the tag is on main
+          persist-credentials: false
+      - name: Tag == __version__ == compose image tag == CHANGELOG heading
+        env:
+          TAG: ${{ github.ref_name }}  # via env, not inlined into the script
+        run: python3 scripts/check-version.py --tag "$TAG"
+      - name: Tag commit must be reachable from main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          sha="$(git rev-parse "refs/tags/${TAG}^{commit}")"   # annotated tags: the tag object is not the commit
+          git merge-base --is-ancestor "$sha" origin/main \
+            || { echo "::error::tag ${TAG} (${sha}) is not on main"; exit 1; }
+
+  test:
+    # Reuses ci.yml (needs `workflow_call:` added to its `on:` block).
+    needs: verify
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: [verify, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read        # checkout
+      packages: write       # push to ghcr.io with GITHUB_TOKEN
+      id-token: write       # OIDC token for the Sigstore signing certificate
+      attestations: write   # store the attestation
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image: ${{ steps.img.outputs.name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lower-case image name (GHCR requires it)
+        id: img
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags and labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index   # annotate the multi-arch index too
+        with:
+          images: ${{ steps.img.outputs.name }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push (linux/amd64 + linux/arm64)
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: mode=max     # BuildKit SLSA provenance, stored in the image index
+          sbom: true               # BuildKit SPDX SBOM, stored in the image index
+
+      - name: Signed build-provenance attestation (verify with `gh attestation verify`)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.img.outputs.name }}   # no tag
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # create the Release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create the GitHub Release from the CHANGELOG section
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          IMAGE: ${{ needs.publish.outputs.image }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          awk -v v="$version" 'BEGIN{p=0} /^## \[/{ if (p) exit; if (index($0,"## [" v "]")==1) {p=1; next} } p' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "Release ${TAG}" > notes.md
+          # shellcheck disable=SC2016  # literal backticks for Markdown
+          {
+            printf '\n---\n\nImage: `%s:%s` (digest `%s`)\n\n' "$IMAGE" "$version" "$DIGEST"
+            printf 'Verify: `gh attestation verify oci://%s:%s -R %s`\n' "$IMAGE" "$version" "$REPO"
+          } >> notes.md
+          flags=(--verify-tag --title "$TAG" --notes-file notes.md)
+          case "$version" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$TAG" "${flags[@]}"
